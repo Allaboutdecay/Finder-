@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bluetooth Finder</title>
+<style>
+  body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#111;color:#fff}
+  header{padding:16px;font-size:20px;font-weight:600}
+  button{font-size:17px;padding:12px 18px;border:0;border-radius:10px;background:#2f7cf6;color:#fff;margin:0 16px 12px}
+  input{font-size:16px;padding:10px;border-radius:10px;border:0;margin:0 16px 12px;width:calc(100% - 32px);box-sizing:border-box}
+  .dev{padding:14px 16px;border-top:1px solid #333;display:flex;justify-content:space-between}
+  .dev small{color:#999}
+  #track{display:none;text-align:center;padding:20px}
+  #dist{font-size:72px;font-weight:700;margin:10px 0}
+  #bar{height:24px;background:#333;border-radius:12px;overflow:hidden}
+  #fill{height:100%;width:0;background:#2fd05b;transition:width .3s,background .3s}
+  #msg{padding:0 16px 12px;color:#f5a623}
+</style>
+</head>
+<body>
+<header>Bluetooth Finder</header>
+<div id="msg"></div>
+
+<div id="listView">
+  <button id="scanBtn">Suchen starten</button>
+  <input id="filter" placeholder="Name filtern (optional)">
+  <div id="list"></div>
+</div>
+
+<div id="track">
+  <div id="name" style="font-size:22px"></div>
+  <div id="dist">–</div>
+  <div id="rssi" style="color:#999"></div>
+  <div id="bar" style="margin:20px 0"><div id="fill"></div></div>
+  <div id="hint" style="font-size:20px;margin-bottom:20px"></div>
+  <label><input type="checkbox" id="sound" checked style="width:auto;margin:0 8px 0 0">Piepton</label><br><br>
+  <button id="back">Zurück zur Liste</button>
+</div>
+
+<script>
+const devices = {};   // id -> {name, rssi(smooth), txPower, last}
+let tracking = null;
+let audioCtx = null;
+const $ = id => document.getElementById(id);
+
+function distance(rssi, tx){
+  const t = (typeof tx === 'number') ? tx : -59; // Signal bei 1 m
+  return Math.pow(10, (t - rssi) / 25);          // Umgebungsfaktor 2.5
+}
+function fmt(d){ return d < 1 ? Math.round(d*100)+' cm' : d.toFixed(1)+' m'; }
+
+function onAdv(ev){
+  const id = ev.device.id || ev.device.name || Math.random();
+  const d = devices[id] || {rssi: ev.rssi};
+  d.name = ev.device.name || ev.name || d.name || 'Unbekannt';
+  d.rssi = d.rssi*0.7 + ev.rssi*0.3;   // glätten
+  d.tx = ev.txPower;
+  d.last = Date.now();
+  devices[id] = d;
+  if(tracking === id) updateTrack(d);
+}
+
+function renderList(){
+  if(tracking) return;
+  const f = $('filter').value.toLowerCase();
+  const rows = Object.entries(devices)
+    .filter(([,d]) => d.name.toLowerCase().includes(f))
+    .sort((a,b) => b[1].rssi - a[1].rssi);
+  $('list').innerHTML = '';
+  rows.forEach(([id,d]) => {
+    const el = document.createElement('div');
+    el.className = 'dev';
+    el.innerHTML = `<div>${d.name}<br><small>${Math.round(d.rssi)} dBm</small></div><div>${fmt(distance(d.rssi,d.tx))}</div>`;
+    el.onclick = () => startTrack(id);
+    $('list').appendChild(el);
+  });
+}
+
+function startTrack(id){
+  tracking = id;
+  $('listView').style.display = 'none';
+  $('track').style.display = 'block';
+  $('name').textContent = devices[id].name;
+  beepLoop();
+}
+$('back').onclick = () => {
+  tracking = null;
+  $('track').style.display = 'none';
+  $('listView').style.display = 'block';
+};
+
+function updateTrack(d){
+  const m = distance(d.rssi, d.tx);
+  $('dist').textContent = fmt(m);
+  $('rssi').textContent = Math.round(d.rssi) + ' dBm';
+  const pct = Math.max(0, Math.min(100, (d.rssi + 100) * 100 / 60)); // -100..-40
+  $('fill').style.width = pct + '%';
+  $('fill').style.background = pct > 70 ? '#2fd05b' : pct > 40 ? '#f5a623' : '#e5484d';
+  $('hint').textContent = pct > 80 ? 'Sehr nah!' : pct > 55 ? 'Warm' : pct > 30 ? 'Kühl' : 'Kalt';
+}
+
+function beepLoop(){
+  if(!tracking) return;
+  const d = devices[tracking];
+  let wait = 1500;
+  if(d){
+    const pct = Math.max(0, Math.min(100, (d.rssi + 100) * 100 / 60));
+    wait = 1500 - pct * 13;       // näher = schneller
+    if($('sound').checked && audioCtx && Date.now() - d.last < 5000){
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.frequency.value = 600 + pct * 6;
+      g.gain.value = 0.2;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + 0.08);
+    }
+  }
+  setTimeout(beepLoop, Math.max(150, wait));
+}
+
+$('scanBtn').onclick = async () => {
+  $('msg').textContent = '';
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if(!navigator.bluetooth){
+    $('msg').textContent = 'Dieser Browser unterstützt kein Web Bluetooth. Bitte in "Bluefy" öffnen.';
+    return;
+  }
+  try{
+    if(navigator.bluetooth.requestLEScan){
+      navigator.bluetooth.addEventListener('advertisementreceived', onAdv);
+      await navigator.bluetooth.requestLEScan({acceptAllAdvertisements:true, keepRepeatedDevices:true});
+    }else{
+      const dev = await navigator.bluetooth.requestDevice({acceptAllDevices:true});
+      dev.addEventListener('advertisementreceived', onAdv);
+      await dev.watchAdvertisements();
+    }
+    $('scanBtn').textContent = 'Suche läuft …';
+    setInterval(renderList, 1000);
+  }catch(e){
+    $('msg').textContent = 'Fehler: ' + e.message;
+  }
+};
+</script>
+</body>
+</html>
